@@ -1,2 +1,4 @@
 # Travelers-Modelling-Competition
 Completed within 2 weeks timeframe
+The response variable is heavily skewed, oversampling method applied
+Classification algorithm include Gradient Boosting, KNN, Decision Tree, SVC, Random Forest, and etc.
