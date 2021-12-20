@@ -1,0 +1,262 @@
+---
+title: "Course Project for STAT 8051"
+author: "Li Chen"
+date: "12/11/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Pull in data
+
+```{r}
+test <- read.csv("test_2021.csv")
+train <- read.csv("train_2021.csv")
+```
+
+
+## Library the packages
+```{r}
+library(lubridate)
+library(glmm)
+library(MASS)
+library(caret)
+library(ROSE)
+library(cvTools)
+library(ROCR)
+```
+
+
+## Diagnostics
+```{r}
+str(train)
+```
+
+
+The data is havily skewed
+```{r}
+table(train$fraud)
+```
+
+## Data processing 
+
+### Creat year and month var using claim_date
+```{r}
+train$year <- format(parse_date_time(train$claim_date, orders = c("ymd", "mdy", "dmy")),format="%Y")
+train$month <- months(as.Date(parse_date_time(train$claim_date, orders = c("ymd", "mdy", "dmy"))))
+train$year <- as.factor(train$year)
+train$month <- as.factor(train$month)
+```
+
+### Remain the first three digits of zip_code and treat it as factor variable
+```{r}
+train$zip_code <- floor(train$zip_code/100)
+train$zip_code <- as.factor(train$zip_code)
+```
+
+### Factorization-characters and binaries to factors for modeling
+```{r}
+train$gender <- as.factor(train$gender)
+train$marital_status <- as.factor(train$marital_status)
+train$high_education_ind <- as.factor(train$high_education_ind)
+train$address_change_ind <- as.factor(train$address_change_ind)
+train$living_status <- as.factor(train$living_status)
+train$claim_day_of_week <- as.factor(train$claim_day_of_week)
+train$accident_site <- as.factor(train$accident_site)
+train$witness_present_ind <- as.factor(train$witness_present_ind)
+train$channel <- as.factor(train$channel)
+train$policy_report_filed_ind <- as.factor(train$policy_report_filed_ind)
+train$vehicle_category <- as.factor(train$vehicle_category)
+train$vehicle_color <- as.factor(train$vehicle_color)
+str(train)
+```
+
+### Dealing with NA in training data
+```{r}
+train <- na.omit(train)
+```
+
+
+### Dealing with outliers in trainning data
+
+#### Age of the driver
+```{r}
+par(mfrow=c(1,2))
+boxplot(train$age_of_driver)
+boxplot(train$age_of_driver)
+```
+
+
+```{r}
+age_threshold <- quantile(train$age_of_driver,0.99)
+```
+
+```{r}
+tab.age <- table(train$fraud,train$age_of_driver>age_threshold)
+prop.table(tab.age)
+```
+
+```{r}
+chisq.test(tab.age,simulate.p.value = FALSE)
+```
+
+#### Annual income
+
+```{r}
+par(mfrow=c(1,2))
+boxplot(train$annual_income)
+boxplot(test$annual_income)
+```
+
+
+#### claim_est_payout
+
+```{r}
+par(mfrow=c(2,2))
+boxplot(train$claim_est_payout)
+boxplot(test$claim_est_payout)
+```
+
+
+## Data graphing
+
+```{r}
+plot(as.factor(train$fraud)~train$zip_code)
+```
+
+```{r}
+tab.zip <- table(as.factor(train$fraud),train$zip_code)
+chisq.test(tab.zip,simulate.p.value = TRUE)
+```
+
+
+## Logistic regression
+
+### Cross-validation to choose cutoff point 
+```{r}
+dat <- train
+n.fold <- 5
+folds <- cvFolds(nrow(dat),n.fold)
+result <- vector("list",n.fold)
+for (k in 1:n.fold){
+    dat.train <- dat[folds$subsets[folds$which!=k],]
+    dat.test <- dat[folds$subsets[folds$which==k],]
+    dat.train.over <- ovun.sample(fraud~.,data=dat.train,method = "over",p=0.5)$data
+    mod <- glm(formula = fraud ~ age_of_driver+marital_status + gender + 
+      safty_rating + annual_income + high_education_ind + address_change_ind + 
+      living_status + accident_site + past_num_of_claims + witness_present_ind + 
+      channel + claim_est_payout + age_of_vehicle + year+ zip_code, family =
+      binomial, data = dat.train.over)
+    predict.mod <- predict(mod,newdata = dat.test,type = "response")
+    pred <- prediction(predict.mod,dat.test$fraud)
+    per <- performance(pred,"f")
+    result[[k]] <- per@x.values[[1]][which.max(per@y.values[[1]])]
+}
+```
+
+```{r}
+cutoffs.pre <- result
+```
+
+```{r}
+cv.cutoff <- function(dat,n.fold,cutoff.list){
+  folds <- cvFolds(nrow(dat),n.fold)
+  p <- length(cutoff.list)
+  result <- matrix(0,length(cutoff.list),n.fold)
+  for (k in 1:n.fold){
+    dat.train <- dat[folds$subsets[folds$which!=k],]
+    dat.test <- dat[folds$subsets[folds$which==k],]
+    dat.train.over <- ovun.sample(fraud~.,data=dat.train,method = "over",p=0.4)$data
+    mod <- glm(formula = fraud ~ age_of_driver+marital_status + gender + 
+      safty_rating + annual_income + high_education_ind + address_change_ind + 
+      living_status + accident_site + past_num_of_claims + witness_present_ind + 
+      channel + claim_est_payout + age_of_vehicle + year+ zip_code, family =
+      binomial, data = dat.train.over)
+    predict.mod <- predict(mod,newdata = dat.test,type = "response")
+    for (j in 1:p){
+      pred <- ifelse(predict.mod > cutoff.list[j],1,0)
+      expected_value <- factor(dat.test$fraud)
+      predicted_value <- factor(pred)
+      CM <- confusionMatrix(data=predicted_value, reference = expected_value,positive = "1")
+      re = CM$byClass[1]
+      prec = CM$byClass[5]
+      result[j,k] = 2 * prec * re / (prec + re)
+    }
+  }
+  Fs <- apply(result,1,mean)
+  return(list(cutoff.list = cutoff.list,F = Fs))
+}
+```
+
+
+```{r}
+cutoffs.op <- numeric(50)
+best_values <- numeric(50)
+for (k in 1: 50){
+  cutoff.list <- seq(0.39,0.41,0.01)
+  cutoffs <- cv.cutoff(train,5,cutoff.list)
+  cutoffs.op[k] <- cutoffs$cutoff.list[which.max(cutoffs$F)]
+  best_values[k] <- max(cutoffs$F)
+}
+```
+
+```{r}
+hist(cutoffs.op)
+```
+
+```{r}
+cutoff.list <- seq(0.25,0.35,0.01)
+cutoffs <- cv.cutoff(train,5,cutoff.list)
+cutoff.op <- cutoffs$cutoff.list[which.max(cutoffs$F)]
+```
+
+
+### Fitting to test data
+```{r}
+#Organize test in the same way as train
+test$gender <- as.factor(test$gender)
+test$marital_status <- as.factor(test$marital_status)
+test$high_education_ind <- as.factor(test$high_education_ind)
+test$address_change_ind <- as.factor(test$address_change_ind)
+test$living_status <- as.factor(test$living_status)
+test$zip_code <- floor(test$zip_code/100)
+test$zip_code <- as.factor(test$zip_code)
+test$claim_day_of_week <- as.factor(test$claim_day_of_week)
+test$accident_site <- as.factor(test$accident_site)
+test$witness_present_ind <- as.factor(test$witness_present_ind)
+test$channel <- as.factor(test$channel)
+test$policy_report_filed_ind <- as.factor(test$policy_report_filed_ind)
+test$vehicle_category <- as.factor(test$vehicle_category)
+test$vehicle_color <- as.factor(test$vehicle_color)
+test$year <- format(parse_date_time(test$claim_date, orders = c("ymd", "mdy", "dmy")),format="%Y")
+test$month <- months(as.Date(parse_date_time(test$claim_date, orders = c("ymd", "mdy", "dmy"))))
+test$year <- as.factor(test$year)
+test$month <- as.factor(test$month)
+test$marital_status[is.na(test$marital_status)] <- 0
+test$witness_present_ind[is.na(test$witness_present_ind)] <- 0
+test$claim_est_payout[is.na(test$claim_est_payout)] <- mean(na.omit(test$claim_est_payout))
+test$age_of_vehicle[is.na(test$age_of_vehicle)] <- mean(na.omit(test$age_of_vehicle))
+```
+
+
+```{r}
+train.over <- ovun.sample(fraud~.,data=train,method = "over",p=0.4)$data
+```
+
+```{r}
+mod <- glm(formula = fraud ~ age_of_driver+marital_status + gender + 
+      safty_rating + annual_income + high_education_ind + address_change_ind + 
+      living_status + accident_site + past_num_of_claims + witness_present_ind + 
+      channel + claim_est_payout + age_of_vehicle + year+ zip_code, family =
+      binomial, data = train.over)
+newval <- predict(mod,newdata=test,type="response")
+submit <- ifelse(newval>0.4,1,0)
+mat <- cbind(claim_number=test$claim_number,pred=submit)
+```
+
+Writing into CSV format for submission
+```{r}
+write.csv(mat,file="Prediction - Logistic Regression.csv",row.names = FALSE)
+```
